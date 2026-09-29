@@ -122,6 +122,11 @@ h1,h2,h3{text-wrap:balance}
 
 /* controls */
 label{display:flex;flex-direction:column;gap:4px;font-size:13px;color:var(--muted);font-weight:550}
+.pkglist{list-style:none;margin:12px 0 0;padding:0;display:flex;flex-direction:column;gap:6px}
+.pkglist li{display:flex;justify-content:space-between;gap:10px;padding:8px 12px;background:var(--surface2);border-radius:10px;font-size:14px}
+.pkgsum{display:flex;flex-direction:column;gap:6px;margin:12px 0;padding:12px 14px;border:1px solid var(--line);border-radius:12px}
+.pkgsum div{display:flex;justify-content:space-between;gap:12px;align-items:baseline}
+.pkgsum b{text-align:right;font-size:15px}
 textarea{font:inherit;font-size:16px;color:var(--ink);background:var(--surface2);border:1px solid transparent;border-radius:10px;padding:10px 12px;width:100%;resize:vertical}
 textarea:focus{outline:2px solid var(--accent);outline-offset:0}
 input,select{background:var(--surface2);border:1px solid transparent;border-radius:10px;padding:10px 12px;font-size:16px;color:var(--ink);width:100%;min-width:0}
@@ -338,7 +343,7 @@ function renderDiary(){
 }
 
 /* ---------- add sheet ---------- */
-const VIEWS=[['search','Search'],['barcode','Barcode'],['label','Label photo'],['receipt','Receipt'],['quick','Quick add']];
+const VIEWS=[['search','Search'],['barcode','Barcode'],['label','Package'],['receipt','Receipt'],['quick','Quick add']];
 let sheet={meal:'breakfast',view:'search'};
 function openAdd(meal,view='search',extra={}){
   sheet={meal,view,...extra};
@@ -597,36 +602,47 @@ function stopScan(){
   if(zxReader){try{zxReader.reset()}catch(e){}zxReader=null}
   const b=$('#scanbox');if(b)b.hidden=true;
 }
-async function decodeBarcodeImage(file){
-  setBc('Reading barcode…');
+/* returns the barcode number in a photo, or null */
+async function findBarcode(cv){
+  if('BarcodeDetector' in window){
+    try{const r=await new BarcodeDetector().detect(cv);if(r.length)return r[0].rawValue}catch(e){}
+  }
   try{
-    const cv=await prepImage(file,{max:1600,gray:false});
-    if('BarcodeDetector' in window){
-      try{const r=await new BarcodeDetector().detect(cv);if(r.length)return onBarcode(r[0].rawValue)}catch(e){}
-    }
     await loadScript(ZX_URL);
     const res=await new ZXing.BrowserMultiFormatReader(zxHints()).decodeFromImageUrl(cv.toDataURL('image/jpeg',.92));
-    onBarcode(res.getText());
-  }catch(e){setBc('No barcode found in that photo. Try a closer, sharper shot, or type the number.',true)}
+    return res.getText();
+  }catch(e){return null}
+}
+async function decodeBarcodeImage(file){
+  setBc('Reading barcode…');
+  const code=await findBarcode(await prepImage(file,{max:1600,gray:false})).catch(()=>null);
+  if(code)onBarcode(code);
+  else setBc('No barcode found in that photo. Try a closer, sharper shot, or type the number.',true);
+}
+/* looks a barcode up in My foods, then Open Food Facts. Returns {food,mine} or null */
+async function lookupBarcode(code){
+  const mine=db.foods.find(f=>f.barcode===code);
+  if(mine)return{food:mine,mine:true};
+  const r=await fetch(`${OFF}/api/v2/product/${code}.json?fields=${OFF_FIELDS}`);
+  const d=r.ok?await r.json():null;
+  const f=d&&d.status===1?offToFood(d.product):null;
+  if(f){f.barcode=code;return{food:f,mine:false}}
+  return null;
 }
 async function onBarcode(code){
   code=String(code||'').replace(/\D/g,'');
   if(code.length<6){setBc('Enter a full barcode number.',true);return}
-  const mine=db.foods.find(f=>f.barcode===code);
-  if(mine){toast('Found in My foods');openAmount(mine);return}
   setBc(`Looking up ${code}…`);
   try{
-    const r=await fetch(`${OFF}/api/v2/product/${code}.json?fields=${OFF_FIELDS}`);
-    const d=r.ok?await r.json():null;
-    const f=d&&d.status===1?offToFood(d.product):null;
-    if(f){f.barcode=code;openAmount(f,{isNew:true});return}
-    sheet.pendingBarcode=code;sheet.view='label';renderSheet();
+    const hit=await lookupBarcode(code);
+    if(hit){if(hit.mine)toast('Found in My foods');openAmount(hit.food,hit.mine?{}:{isNew:true});return}
+    sheet.pendingBarcode=code;sheet.pkg=null;sheet.view='label';renderSheet();
   }catch(e){setBc('Lookup failed. Check your connection and try again.',true)}
 }
 
 /* OCR (runs on this phone with Tesseract) */
 let ocrW=null,ocrWLang='',ocrStatusEl=null;
-async function ocr(canvas,st){
+async function ocr(canvas,st,full=false){
   ocrStatusEl=st;
   const lang=db.settings.ocrLang;
   if(!ocrW||ocrWLang!==lang){
@@ -644,7 +660,9 @@ async function ocr(canvas,st){
   st.textContent='Reading text…';
   const{data}=await ocrW.recognize(canvas);
   st.textContent='';
-  return data.text||'';
+  if(!full)return data.text||'';
+  const lines=data.lines||(data.blocks||[]).flatMap(b=>(b.paragraphs||[]).flatMap(p=>p.lines||[]));
+  return{text:data.text||'',lines:lines.map(l=>({text:l.text||'',h:l.bbox?l.bbox.y1-l.bbox.y0:0,conf:l.confidence||0}))};
 }
 function ocrFail(st,e){
   st.classList.add('err');
@@ -658,7 +676,7 @@ const LABELS=[
   [null,/caloriesfromfat|fromfat|飽和脂肪酸|不飽和|トランス脂肪酸|saturated(?:fat)?|trans(?:fat)?|polyunsat\w*|monounsat\w*|コレステロール|cholesterol/g],
   [null,/食塩相当量|食塩|ナトリウム|sodium|salt|食物繊維|dietaryfib\w*|fib(?:er|re)|糖類|(?:total|added)?sugars?|カルシウム|calcium|鉄|iron|カリウム|potassium|ビタミン|vitamin\w*/g],
   ['kcal',/エネル(?:ギー?)?|ネルギー?|熱量|カロリー?|energy|calories|calorie/g],
-  ['p',/たん[ぱば]く質?|タン[パバ]ク質?|蛋白質?|protein/g],
+  ['p',/たん[ぱばは]+く質?|[ぱばは]く質|タン[パバハ]+ク質?|蛋白質?|protein/g],
   ['f',/脂[質賀貿資]|lipids?|totalfat|fat/g],
   ['c',/炭水化物?|水化物|totalcarbohydrates?|carbohydrates?|carbs?/g],
   ['c2',/糖質/g]
@@ -682,7 +700,7 @@ function parseLabel(raw){
   for(const line of text.split('\n').map(l=>l.replace(/\s+/g,'')).filter(Boolean)){
     // every label on this line, earliest first, longer match wins on overlap
     let hits=[];
-    for(const[key,re]of LABELS)for(const m of line.matchAll(re))hits.push({key,s:m.index,e:m.index+m[0].length});
+    for(const[key,re]of LABELS){re.lastIndex=0;for(const m of line.matchAll(re))hits.push({key,s:m.index,e:m.index+m[0].length})}
     hits.sort((a,b)=>a.s-b.s||b.e-a.e);
     hits=hits.filter((h,i,a)=>!a.slice(0,i).some(x=>h.s<x.e));
     if(!hits.length){if(!serveLine.test(line))column.push(...nums(line));continue}
@@ -731,15 +749,84 @@ function parseReceipt(raw){
   return out.slice(0,40);
 }
 
-/* label photo */
+/* package scan: several photos of one package -> barcode, name and nutrition, saved to My foods */
+function pkgState(){
+  if(!sheet.pkg)sheet.pkg={barcode:sheet.pendingBarcode||null,photos:[],texts:[],names:[]};
+  return sheet.pkg;
+}
 function paneLabel(){
-  P().innerHTML=`${backToReceiptBtn()}<div class="card">${sheet.pendingBarcode?`<p class="note" style="margin-bottom:12px">Barcode ${esc(sheet.pendingBarcode)} isn’t in the database yet. Photograph its nutrition label and the values are saved with the barcode for next time.</p>`:''}
-    ${pasteBox('lbl','エネルギー 243kcal\nたんぱく質 3.1g …','Read values')}
-    <p class="sec" style="margin-top:18px">Or use this app’s photo reader</p>
-    <p class="hint">Photograph the nutrition panel (栄養成分表示 or Nutrition Facts) straight on, filling the frame. Slower and less accurate than the iPhone scanner above.</p>
-    ${photoButtons('lbl')}<p id="ocrstat" class="status"></p>
+  const k=pkgState();
+  P().innerHTML=`${backToReceiptBtn()}<div class="card">
+    ${k.barcode?`<p class="note" style="margin-bottom:12px">Barcode ${esc(k.barcode)} is new. Add photos of the name and the nutrition table, and it is saved under this barcode for next time.</p>`:''}
+    <p class="hint">Photograph the package: the <b>barcode</b>, the <b>front</b> with the name, and the <b>nutrition table</b> (栄養成分表示). Add as many photos as you need. A barcode you saved before opens the food right away. Everything is read on this phone.</p>
+    <div class="btnrow"><label class="btn primary">Take photo<input type="file" accept="image/*" capture="environment" id="pkg-cam" hidden></label><label class="btn">Photo library<input type="file" accept="image/*" multiple id="pkg-lib" hidden></label></div>
+    <p id="ocrstat" class="status"></p>
+    ${k.photos.length?`<ul class="pkglist">${k.photos.map((x,i)=>`<li><span>Photo ${i+1}</span><span class="small">${esc(x)}</span></li>`).join('')}</ul>`:''}
+    ${k.photos.length||k.texts.length?pkgSummary(k):''}
+  </div>
+  <div class="card">${pasteBox('lbl','エネルギー 243kcal\nたんぱく質 3.1g …','Add this text')}
     <button class="linkbtn" data-act="newfood">Enter the values by hand instead</button></div>`;
-  bindPhoto('lbl',runLabelOCR);
+  for(const s of['cam','lib'])$('#pkg-'+s).addEventListener('change',async e=>{
+    const files=[...e.target.files];e.target.value='';
+    for(const f of files)if(await runPkgPhoto(f))return;
+  });
+}
+function pkgMerge(k){
+  const parsed=k.texts.map(parseLabel).map(r=>({r,n:[r.kcal,r.p,r.c,r.f].filter(x=>x!=null).length})).sort((a,b)=>b.n-a.n);
+  const out={basis:'100g',servingG:null,kcal:null,p:null,c:null,f:null};
+  if(parsed.length){Object.assign(out,{basis:parsed[0].r.basis,servingG:parsed[0].r.servingG})}
+  for(const key of['kcal','p','c','f'])out[key]=(parsed.find(x=>x.r[key]!=null)||{r:{}}).r[key]??null;
+  if(out.servingG==null)out.servingG=(parsed.find(x=>x.r.servingG!=null)||{r:{}}).r.servingG??null;
+  const best=k.names.slice().sort((a,b)=>b.h-a.h)[0];
+  return{...out,name:best?best.text:'',barcode:k.barcode};
+}
+function pkgSummary(k){
+  const m=pkgMerge(k),n=[m.kcal,m.p,m.c,m.f].filter(x=>x!=null).length;
+  return `<div class="pkgsum">
+    <div><span class="lbl">Barcode</span><b>${k.barcode?esc(k.barcode):'none found'}</b></div>
+    <div><span class="lbl">Name</span><b>${m.name?esc(m.name):'not found yet'}</b></div>
+    <div><span class="lbl">Nutrition</span><b>${n} of 4 values${m.kcal!=null?` · ${fmt(m.kcal)} kcal`:''}</b></div>
+  </div>
+  <button class="btn primary wide" data-act="pkgDone">Review and save</button>`;
+}
+function pkgDone(){
+  const k=pkgState(),m=pkgMerge(k),n=[m.kcal,m.p,m.c,m.f].filter(x=>x!=null).length;
+  openForm(m,{raw:k.texts.join('\n\n---\n\n'),
+    note:`${m.barcode?`Barcode ${m.barcode}. `:''}Read ${n} of 4 nutrition values${m.name?' and a name':''}. Check everything, then continue. It will be saved to My foods${m.barcode?' under this barcode':''}.`});
+}
+/* the largest, cleanest text line on a package front is usually the product name */
+const NAME_SKIP=/栄養|成分|原材料|内容量|賞味|消費|期限|保存|製造|販売|名称|アレルギー|使用|注意|お問い合わせ|nutrition|ingredient|serving|net ?w|best before|contains|allergen|www|http|©|®/i;
+function nameCandidates(lines){
+  return lines.map(l=>({text:normText(l.text).replace(/\s+/g,' ').replace(/([぀-ヿ一-鿿]) (?=[぀-ヿ一-鿿])/g,'$1').replace(/^[^\wぁ-ヿ一-鿿]+|[^\wぁ-ヿ一-鿿)）!！]+$/g,'').trim(),h:l.h,conf:l.conf}))
+    .filter(l=>{
+      const letters=(l.text.match(/[A-Za-zぁ-ヿ一-鿿]/g)||[]).length,digits=(l.text.match(/\d/g)||[]).length;
+      return l.conf>=55&&letters>=2&&digits<=letters/2&&l.text.length<=40&&!NAME_SKIP.test(l.text)
+        &&!LABELS.some(([,re])=>l.text.toLowerCase().replace(/\s+/g,'').match(re));
+    });
+}
+/* returns true when the food was found and the sheet moved on */
+async function runPkgPhoto(file){
+  const k=pkgState(),st=$('#ocrstat');st.classList.remove('err');
+  try{
+    st.textContent=`Looking for a barcode in photo ${k.photos.length+1}…`;
+    let gotCode=false;
+    if(!k.barcode){
+      const code=String(await findBarcode(await prepImage(file,{max:1600,gray:false}))||'').replace(/\D/g,'');
+      if(code.length>=6){
+        k.barcode=code;gotCode=true;
+        st.textContent=`Barcode ${code} found. Checking…`;
+        const hit=await lookupBarcode(code).catch(()=>null);
+        if(hit){toast(hit.mine?'Found in My foods':'Found in Open Food Facts');openAmount(hit.food,hit.mine?{}:{isNew:true});return true}
+      }
+    }
+    const res=await ocr(await prepImage(file,{max:2200}),st,true);
+    k.texts.push(res.text);
+    const names=nameCandidates(res.lines);k.names.push(...names);
+    const r=parseLabel(res.text),n=[r.kcal,r.p,r.c,r.f].filter(x=>x!=null).length;
+    k.photos.push([gotCode?'barcode':'',n?`${n} nutrition values`:'',names.length?'text':''].filter(Boolean).join(', ')||'nothing readable');
+    paneLabel();
+    return false;
+  }catch(e){ocrFail(st,e);return true}
 }
 /* iPhone Live Text: Apple's own on-device scanner fills a text box, far better than Tesseract */
 function pasteBox(id,ph,btn){
@@ -747,21 +834,6 @@ function pasteBox(id,ph,btn){
     <textarea id="${id}-txt" rows="5" placeholder="${esc(ph)}"></textarea>
     <button class="btn primary wide" data-act="${id}Paste" style="margin-top:8px">${btn}</button>`;
 }
-function labelFromText(text){
-  const parsed=parseLabel(text);
-  const found=[parsed.kcal,parsed.p,parsed.c,parsed.f].filter(x=>x!=null).length;
-  openForm({...parsed,barcode:sheet.pendingBarcode||null},{raw:text,
-    note:parsed.kcal==null?'Calories were not found. Fill in the values from the label, or scan again.'
-      :`Read ${found} of 4 values from the label. Check them, add a name, then continue.`});
-}
-async function runLabelOCR(file){
-  const st=$('#ocrstat');st.classList.remove('err');
-  try{
-    st.textContent='Preparing photo…';
-    labelFromText(await ocr(await prepImage(file,{max:2200}),st));
-  }catch(e){ocrFail(st,e)}
-}
-
 /* receipt */
 function paneReceipt(){
   P().innerHTML=`<div class="card">${pasteBox('rc','おにぎり ツナマヨ ¥150\nサラダチキン ¥298 …','Find items')}
@@ -993,8 +1065,9 @@ document.addEventListener('click',e=>{
     case'online':searchOnline();break;
     case'pick':{const f=db.foods.find(x=>x.id===id);if(f)openAmount(f);break}
     case'pickOnline':{const f=(sheet.onlineResults||[])[+id];if(f)openAmount({...f},{isNew:true});break}
-    case'lblPaste':{const t=$('#lbl-txt').value.trim();if(t)labelFromText(t);else{toast('Scan or paste the label text first.');$('#lbl-txt').focus()}break}
+    case'lblPaste':{const t=$('#lbl-txt').value.trim();if(t){pkgState().texts.push(t);pkgState().photos.push('scanned text');paneLabel()}else{toast('Scan or paste the label text first.');$('#lbl-txt').focus()}break}
     case'rcPaste':{const t=$('#rc-txt').value.trim();if(t)receiptFromText(t);else{toast('Scan or paste the receipt text first.');$('#rc-txt').focus()}break}
+    case'pkgDone':pkgDone();break;
     case'newfood':openForm({basis:'100g',barcode:sheet.pendingBarcode||null,name:sheet.receiptIdx!=null&&R?R.items[sheet.receiptIdx].name:''});break;
     case'setamt':$('#amt').value=b.dataset.v;$('#amt').dispatchEvent(new Event('input'));break;
     case'commit':commitAmount();break;
