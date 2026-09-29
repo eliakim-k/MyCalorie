@@ -10,6 +10,9 @@
 <meta name="theme-color" content="#F3F6F4" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#0E1412" media="(prefers-color-scheme: dark)">
 <title>MyCalorie</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="icon" type="image/png" href="icons/icon-192.png">
 <style>
 :root{
   --bg:#F3F6F4;--surface:#FFFFFF;--surface2:#E8EFEB;--ink:#15201C;--muted:#5C6B65;--line:#DCE4E0;
@@ -109,7 +112,7 @@ h1,h2,h3{text-wrap:balance}
 .sh-in{max-width:560px;margin:0 auto}
 .sh-row{display:flex;align-items:center;justify-content:space-between;gap:10px;min-height:44px}
 .sh-row h2{margin:0;font-size:17px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-#mealSel{width:auto;padding:6px 10px;border-radius:999px;background:var(--accent-soft);color:var(--accent);font-weight:650;font-size:15px;border:0}
+#mealSel{width:auto;padding:6px 10px;border-radius:999px;background:var(--accent-soft);color:var(--accent);font-weight:650;font-size:16px;border:0}
 .closebtn{border:0;background:none;color:var(--accent);font-weight:650;padding:8px 4px}
 .tabs{display:flex;gap:2px;overflow-x:auto;scrollbar-width:none;margin:0 -4px}
 .tabs::-webkit-scrollbar{display:none}
@@ -874,9 +877,15 @@ function renderSettings(){
   bind('#s-lang',e=>{s.ocrLang=e.target.value;save();toast('Saved')});
   bind('#importFile',e=>{const f=e.target.files[0];e.target.value='';if(f)importData(f)});
 }
-function exportData(){
+async function exportData(){
+  const name=`mycalorie-backup-${dkey(new Date())}.json`;
   const blob=new Blob([JSON.stringify(db)],{type:'application/json'});
-  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`mycalorie-backup-${dkey(new Date())}.json`;
+  // iPhone: the share sheet can save to Files or AirDrop; a plain download often just opens a preview
+  try{
+    const file=new File([blob],name,{type:'application/json'});
+    if(navigator.canShare&&navigator.canShare({files:[file]})){await navigator.share({files:[file],title:name});return}
+  }catch(e){if(e&&e.name==='AbortError')return}
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;
   document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},1500);
 }
 function importData(file){
@@ -979,17 +988,9 @@ document.addEventListener('visibilitychange',()=>{
   else if(curView==='diary'&&$('#sheet').hidden)renderDiary();
 });
 
-/* home-screen icon: a partly filled calorie ring */
-(function icon(){
-  try{
-    const c=document.createElement('canvas');c.width=c.height=180;const x=c.getContext('2d');
-    x.fillStyle='#0B7A63';x.fillRect(0,0,180,180);
-    x.lineWidth=22;x.lineCap='round';
-    x.strokeStyle='rgba(255,255,255,.25)';x.beginPath();x.arc(90,90,52,0,Math.PI*2);x.stroke();
-    x.strokeStyle='#fff';x.beginPath();x.arc(90,90,52,-Math.PI/2,-Math.PI/2+Math.PI*2*.8);x.stroke();
-    const l=document.createElement('link');l.rel='apple-touch-icon';l.href=c.toDataURL('image/png');document.head.appendChild(l);
-  }catch(e){}
-})();
+/* offline support: sw.js caches the app files (never your data); needs https */
+if('serviceWorker' in navigator&&window.isSecureContext)
+  addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
 try{navigator.storage&&navigator.storage.persist&&navigator.storage.persist()}catch(e){}
 renderDiary();
 </script>
